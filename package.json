@@ -1,0 +1,37 @@
+{
+  "name": "octomcp",
+  "version": "1.0.0",
+  "type": "module",
+  "description": "OctoMCP — Solana Programs Model Context Protocol (MCP) that allows anyone to build, test, and deploy Solana programs within minutes.",
+  "main": "index.js",
+  "bin": {
+    "octomcp": "./build/index.js"
+  },
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1",
+    "build": "tsc"
+  },
+  "keywords": [
+    "claude",
+    "mcp",
+    "code",
+    "save",
+    "desktop",
+    "solana"
+  ],
+  "author": "",
+  "license": "ISC",
+  "files": [
+    "build"
+  ],
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.10.2",
+    "form-data": "^4.0.2",
+    "node-fetch": "^3.3.2",
+    "zod": "^3.24.3"
+  },
+  "devDependencies": {
+    "@types/node": "^22.15.3",
+    "typescript": "^5.8.3"
+  }
+}
