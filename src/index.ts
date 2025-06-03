@@ -517,6 +517,754 @@ server.tool(
   }
 );
 
+// Enhanced AI Audit Tool Implementation
+// Replace the existing generate-AI-Audit tool with this implementation
+
+// Advanced code analysis utilities
+interface CodeContext {
+  functions: Array<{
+    name: string;
+    body: string;
+    startLine: number;
+    endLine: number;
+  }>;
+  structs: Array<{
+    name: string;
+    attributes: string[];
+    body: string;
+  }>;
+  imports: string[];
+  constraints: string[];
+}
+
+// Parse code structure for better analysis
+function parseCodeStructure(code: string): CodeContext {
+  const lines = code.split('\n');
+  const context: CodeContext = {
+    functions: [],
+    structs: [],
+    imports: [],
+    constraints: []
+  };
+
+  // Extract imports
+  const importMatches = code.match(/use\s+[^;]+;/g) || [];
+  context.imports = importMatches.map(imp => imp.trim());
+
+  // Extract functions with their bodies
+  const functionRegex = /(?:pub\s+)?fn\s+(\w+)[^{]*\{/g;
+  let match;
+  while ((match = functionRegex.exec(code)) !== null) {
+    const functionName = match[1];
+    const startIndex = match.index;
+    const startLine = code.substring(0, startIndex).split('\n').length;
+    
+    // Find matching closing brace
+    let braceCount = 0;
+    let endIndex = startIndex;
+    for (let i = startIndex; i < code.length; i++) {
+      if (code[i] === '{') braceCount++;
+      if (code[i] === '}') braceCount--;
+      if (braceCount === 0) {
+        endIndex = i;
+        break;
+      }
+    }
+    
+    const functionBody = code.substring(startIndex, endIndex + 1);
+    const endLine = code.substring(0, endIndex).split('\n').length;
+    
+    context.functions.push({
+      name: functionName,
+      body: functionBody,
+      startLine,
+      endLine
+    });
+  }
+
+  // Extract struct definitions with better parsing
+  const structRegex = /((?:#\[[^\]]+\]\s*)*)\bstruct\s+(\w+)[^{]*\{([^}]+)\}/gs;
+  while ((match = structRegex.exec(code)) !== null) {
+    const attributes = match[1] ? match[1].match(/#\[[^\]]+\]/g) || [] : [];
+    const structName = match[2];
+    const structBody = match[3];
+    
+    context.structs.push({
+      name: structName,
+      attributes: attributes.map(attr => attr.trim()),
+      body: structBody
+    });
+  }
+
+  // Extract constraints (has_one, constraint = patterns)
+  const constraintMatches = code.match(/(?:has_one|constraint)\s*=\s*[^,\]]+/g) || [];
+  context.constraints = constraintMatches.map(c => c.trim());
+
+  return context;
+}
+
+// Security patterns and anti-patterns for Solana programs
+interface SecurityCheck {
+  name: string;
+  analyzer: (code: string, context: CodeContext) => SecurityIssue[];
+  severity: 'critical' | 'high' | 'medium' | 'low' | 'info';
+  description: string;
+  recommendation: string;
+  category: 'access_control' | 'arithmetic' | 'account_validation' | 'data_handling' | 'best_practices' | 'resource_management';
+}
+
+interface SecurityIssue {
+  line?: number;
+  context?: string;
+  details?: string;
+}
+
+const SECURITY_CHECKS: SecurityCheck[] = [
+  // Critical Security Issues
+  {
+    name: "Missing Owner Check",
+    analyzer: (code: string, context: CodeContext) => {
+      const issues: SecurityIssue[] = [];
+      
+      // Look for functions that modify state without proper authority checks
+      context.functions.forEach(func => {
+        const hasStateModification = /&mut|\.try_borrow_mut|\.borrow_mut/.test(func.body);
+        
+        if (hasStateModification) {
+          // Check for various forms of authority validation
+          const hasRequireCheck = /require!\s*\([^)]*(?:authority|owner|signer)[^)]*\.key\(\)|require!\s*\([^)]*==/.test(func.body);
+          const hasConstraintValidation = /has_one\s*=\s*(?:authority|owner)|constraint\s*=.*(?:authority|owner)/.test(code);
+          const hasSignerCheck = /require!\s*\([^)]*\.is_signer/.test(func.body);
+          
+          // Check if this is actually a privileged operation that needs owner checks
+          const isPrivileged = /transfer|close|initialize|update|admin|withdraw|mint|break/.test(func.name);
+          const isPublicFunction = /pub\s+fn/.test(func.body);
+          
+          if (isPrivileged && isPublicFunction && !hasRequireCheck && !hasConstraintValidation && !hasSignerCheck) {
+            issues.push({
+              line: func.startLine,
+              context: `Function: ${func.name}`,
+              details: "Privileged state-modifying function without explicit authority validation"
+            });
+          }
+        }
+      });
+      
+      return issues;
+    },
+    severity: 'critical',
+    description: "Functions modifying state without proper authority validation",
+    recommendation: "Add require!() checks, has_one constraints, or other authority validation before state modifications.",
+    category: 'access_control'
+  },
+  
+  {
+    name: "Unchecked Arithmetic Operations",
+    analyzer: (code: string, context: CodeContext) => {
+      const issues: SecurityIssue[] = [];
+      
+      context.functions.forEach(func => {
+        // Look for arithmetic operations that could overflow
+        const arithmeticRegex = /(\w+)\s*([+\-*\/])\s*(\w+)/g;
+        let match;
+        
+        while ((match = arithmeticRegex.exec(func.body)) !== null) {
+          const operation = match[0];
+          const operator = match[2];
+          
+          // Skip if it's already using checked arithmetic
+          if (/checked_(?:add|sub|mul|div)|saturating_(?:add|sub|mul)/.test(func.body.substring(Math.max(0, match.index - 50), match.index + 50))) {
+            continue;
+          }
+          
+          // Skip simple constant arithmetic or assignments
+          if (/^\d+$/.test(match[1]) && /^\d+$/.test(match[3])) {
+            continue;
+          }
+          
+          // Skip if it's part of an assignment without risk
+          if (/=\s*$/.test(func.body.substring(Math.max(0, match.index - 10), match.index))) {
+            continue;
+          }
+          
+          // This is potentially risky arithmetic
+          const line = func.body.substring(0, match.index).split('\n').length + func.startLine - 1;
+          issues.push({
+            line,
+            context: `Operation: ${operation}`,
+            details: `Arithmetic operation '${operator}' without overflow protection`
+          });
+        }
+      });
+      
+      return issues;
+    },
+    severity: 'high',
+    description: "Arithmetic operations without overflow/underflow protection",
+    recommendation: "Use checked_add(), checked_sub(), checked_mul(), or checked_div() for arithmetic operations to prevent overflow/underflow attacks.",
+    category: 'arithmetic'
+  },
+
+  {
+    name: "Missing Signer Validation",
+    analyzer: (code: string, context: CodeContext) => {
+      const issues: SecurityIssue[] = [];
+      const processedAccounts = new Set<string>(); // Prevent duplicates
+      
+      // Extract all instruction contexts (structs with accounts)
+      const instructionContexts = context.structs.filter(struct => 
+        struct.attributes.some(attr => attr.includes('derive') && attr.includes('Accounts'))
+      );
+      
+      instructionContexts.forEach(instructionCtx => {
+        const signerMatches = instructionCtx.body.match(/(\w+):\s*Signer<'info>/g) || [];
+        
+        signerMatches.forEach(signerDecl => {
+          const accountName = signerDecl.split(':')[0].trim();
+          
+          // Skip if already processed (prevent duplicates)
+          if (processedAccounts.has(accountName)) {
+            return;
+          }
+          processedAccounts.add(accountName);
+          
+          // Anchor's Signer<'info> automatically validates signatures, so this is usually fine
+          // Only flag if this is a privileged signer that needs additional validation
+          const isPrivilegedSigner = accountName.includes('authority') || accountName.includes('admin') || accountName.includes('owner');
+          
+          if (isPrivilegedSigner) {
+            // Check for additional validation patterns
+            const hasExplicitValidation = new RegExp(
+              `(?:require!|constraint).*${accountName}\\.|has_one\\s*=\\s*${accountName}|${accountName}\\s*@`, 'i'
+            ).test(code);
+            
+            // Check if there's a has_one constraint relating to this signer
+            const hasOwnershipConstraint = new RegExp(`has_one\\s*=\\s*${accountName}`, 'i').test(code);
+            
+            // Only flag if it's a privileged signer without ownership constraints
+            if (!hasExplicitValidation && !hasOwnershipConstraint) {
+              issues.push({
+                context: `Instruction: ${instructionCtx.name}, Account: ${accountName}`,
+                details: "Privileged signer account without explicit ownership validation beyond signature check"
+              });
+            }
+          }
+        });
+      });
+      
+      return issues;
+    },
+    severity: 'medium', // Reduced from 'high' since Signer<'info> provides basic protection
+    description: "Privileged signer accounts that may benefit from additional validation",
+    recommendation: "For privileged operations, consider adding 'has_one = owner' constraints or explicit authority checks beyond signature validation.",
+    category: 'access_control'
+  },
+
+  {
+    name: "Missing Rent Exemption Check",
+    analyzer: (code: string, context: CodeContext) => {
+      const issues: SecurityIssue[] = [];
+      
+      context.functions.forEach(func => {
+        // Look for account creation patterns
+        const hasAccountCreation = /create_account|allocate|assign|space\s*=/.test(func.body);
+        
+        if (hasAccountCreation) {
+          // Check if rent exemption is verified
+          const hasRentCheck = /rent.*minimum_balance|\.is_exempt|rent_exempt/.test(func.body);
+          
+          if (!hasRentCheck) {
+            issues.push({
+              line: func.startLine,
+              context: `Function: ${func.name}`,
+              details: "Account creation without rent exemption validation"
+            });
+          }
+        }
+      });
+      
+      return issues;
+    },
+    severity: 'high',
+    description: "Account creation without rent exemption validation",
+    recommendation: "Ensure accounts have sufficient lamports for rent exemption using Rent::minimum_balance() checks.",
+    category: 'account_validation'
+  },
+
+  // Medium Priority Issues
+  {
+    name: "Missing Error Handling",
+    analyzer: (code: string, context: CodeContext) => {
+      const issues: SecurityIssue[] = [];
+      
+      context.functions.forEach(func => {
+        const unwrapMatches = func.body.match(/\.unwrap\(\)|\.expect\(/g);
+        
+        if (unwrapMatches) {
+          // Check if there's proper error handling context
+          const hasErrorHandling = /Result<|Error|try_|match\s+.*\{/.test(func.body);
+          
+          if (!hasErrorHandling) {
+            issues.push({
+              line: func.startLine,
+              context: `Function: ${func.name}`,
+              details: `Found ${unwrapMatches.length} unwrap/expect calls without error handling`
+            });
+          }
+        }
+      });
+      
+      return issues;
+    },
+    severity: 'medium',
+    description: "Use of unwrap() or expect() without proper error handling",
+    recommendation: "Replace unwrap() and expect() with proper error handling using ? operator or match statements.",
+    category: 'best_practices'
+  },
+
+  // Low Priority Issues
+  {
+    name: "TODO/FIXME Comments",
+    analyzer: (code: string, context: CodeContext) => {
+      const issues: SecurityIssue[] = [];
+      const todoMatches = code.match(/(?:TODO|FIXME|XXX|HACK):[^\n]*/gi);
+      
+      if (todoMatches) {
+        todoMatches.forEach(todo => {
+          const index = code.indexOf(todo);
+          const line = code.substring(0, index).split('\n').length;
+          issues.push({
+            line,
+            context: todo.trim(),
+            details: "Unresolved development comment"
+          });
+        });
+      }
+      
+      return issues;
+    },
+    severity: 'low',
+    description: "Unresolved TODO/FIXME comments found",
+    recommendation: "Resolve all TODO and FIXME comments before deploying to production.",
+    category: 'best_practices'
+  },
+
+  {
+    name: "Debug Print Statements",
+    analyzer: (code: string, context: CodeContext) => {
+      const issues: SecurityIssue[] = [];
+      const debugMatches = code.match(/(?:println!|dbg!|print!)\s*\([^)]*\)/g);
+      
+      if (debugMatches) {
+        debugMatches.forEach(debug => {
+          const index = code.indexOf(debug);
+          const line = code.substring(0, index).split('\n').length;
+          issues.push({
+            line,
+            context: debug.trim(),
+            details: "Debug statement should be removed for production"
+          });
+        });
+      }
+      
+      return issues;
+    },
+    severity: 'low',
+    description: "Debug print statements found",
+    recommendation: "Remove debug print statements from production code to reduce compute costs.",
+    category: 'best_practices'
+  },
+
+  // Info Level
+  {
+    name: "Gas Optimization Opportunity",
+    analyzer: (code: string, context: CodeContext) => {
+      const issues: SecurityIssue[] = [];
+      
+      // Look for dynamic data structures in account definitions
+      context.structs.forEach(struct => {
+        if (struct.attributes.some(attr => attr.includes('#[account]'))) {
+          const hasDynamicTypes = /Vec<|String|HashMap|BTreeMap/.test(struct.body);
+          if (hasDynamicTypes) {
+            issues.push({
+              context: `Struct: ${struct.name}`,
+              details: "Account struct uses dynamic data structures"
+            });
+          }
+        }
+      });
+      
+      return issues;
+    },
+    severity: 'info',
+    description: "Dynamic data structures in account definitions",
+    recommendation: "Consider using fixed-size arrays or more efficient data structures to reduce compute costs.",
+    category: 'resource_management'
+  }
+];
+
+// Function to perform security analysis
+function performSecurityAnalysis(code: string, auditType: string): {
+  issues: Array<{
+    check: string;
+    severity: string;
+    description: string;
+    recommendation: string;
+    category: string;
+    lineNumber?: number;
+    context?: string;
+    details?: string;
+  }>;
+  summary: {
+    critical: number;
+    high: number;
+    medium: number;
+    low: number;
+    info: number;
+    total: number;
+  };
+} {
+  const issues: Array<{
+    check: string;
+    severity: string;
+    description: string;
+    recommendation: string;
+    category: string;
+    lineNumber?: number;
+    context?: string;
+    details?: string;
+  }> = [];
+
+  const summary = {
+    critical: 0,
+    high: 0,
+    medium: 0,
+    low: 0,
+    info: 0,
+    total: 0
+  };
+
+  // Parse code structure for better analysis
+  const codeContext = parseCodeStructure(code);
+
+  // Filter checks based on audit type
+  let checksToRun = SECURITY_CHECKS;
+  if (auditType === 'security-focused') {
+    checksToRun = SECURITY_CHECKS.filter(check => 
+      check.severity === 'critical' || check.severity === 'high'
+    );
+  } else if (auditType === 'basic') {
+    checksToRun = SECURITY_CHECKS.filter(check => 
+      check.severity === 'critical' || check.severity === 'high' || check.severity === 'medium'
+    );
+  }
+
+  // Run security checks with advanced analysis
+  for (const check of checksToRun) {
+    const checkIssues = check.analyzer(code, codeContext);
+    
+    checkIssues.forEach(issue => {
+      issues.push({
+        check: check.name,
+        severity: check.severity,
+        description: check.description,
+        recommendation: check.recommendation,
+        category: check.category,
+        lineNumber: issue.line,
+        context: issue.context,
+        details: issue.details
+      });
+
+      summary[check.severity]++;
+      summary.total++;
+    });
+  }
+
+  return { issues, summary };
+}
+
+// Function to analyze code complexity
+function analyzeComplexity(code: string): {
+  linesOfCode: number;
+  functions: number;
+  cyclomaticComplexity: number;
+  nestingDepth: number;
+} {
+  const lines = code.split('\n').filter(line => line.trim() && !line.trim().startsWith('//'));
+  const functions = (code.match(/fn\s+\w+/g) || []).length;
+  
+  // Simple cyclomatic complexity (count decision points)
+  const decisions = (code.match(/if|while|for|match|loop|\?/g) || []).length;
+  const cyclomaticComplexity = decisions + 1;
+  
+  // Calculate maximum nesting depth
+  let currentDepth = 0;
+  let maxDepth = 0;
+  for (const char of code) {
+    if (char === '{') {
+      currentDepth++;
+      maxDepth = Math.max(maxDepth, currentDepth);
+    } else if (char === '}') {
+      currentDepth--;
+    }
+  }
+
+  return {
+    linesOfCode: lines.length,
+    functions,
+    cyclomaticComplexity,
+    nestingDepth: maxDepth
+  };
+}
+
+// Enhanced MCP Tool: Generate AI Audit
+server.tool(
+  "generate-AI-Audit",
+  "Generate a comprehensive security audit report for a Solana program",
+  {
+    buildId: z.string().min(1).describe("Build ID of the program to audit"),
+    programAddress: z.string().optional().describe("Program address (optional, will be fetched from build if not provided)"),
+    auditType: z.enum(["basic", "comprehensive", "security-focused"]).default("basic").describe("Type of audit to perform"),
+    includeRecommendations: z.boolean().default(true).describe("Include security recommendations in the audit report"),
+  },
+  async ({ buildId, programAddress, auditType, includeRecommendations }) => {
+    try {
+      console.error(`🔍 Starting ${auditType} security audit for build ID: ${buildId}`);
+      
+      // Fetch the source code from the build
+      const sourceUrl = `${API_BASE_URL}:3003/program/${buildId}/file/lib.rs`;
+      console.error(`📥 Fetching source code from ${sourceUrl}...`);
+      
+      let sourceCode: string;
+      try {
+        const sourceRes = await fetch(sourceUrl);
+        if (!sourceRes.ok) {
+          throw new Error(`Failed to fetch source code: ${sourceRes.status} ${sourceRes.statusText}`);
+        }
+        sourceCode = await sourceRes.text();
+      } catch (err) {
+        return {
+          content: [
+            {
+              type: "text",
+              text: `❌ Failed to fetch source code for build ID ${buildId}: ${err instanceof Error ? err.message : String(err)}\n\nPlease ensure the build ID is valid and the source code is available.`,
+            },
+          ],
+        };
+      }
+
+      // Fetch IDL for additional context
+      let idlData: any = null;
+      try {
+        const idlUrl = `${API_BASE_URL}:3003/program/${buildId}/file/idl.json`;
+        const idlRes = await fetch(idlUrl);
+        if (idlRes.ok) {
+          idlData = await idlRes.json();
+          console.error(`📝 IDL data fetched successfully`);
+        }
+      } catch (err) {
+        console.error(`⚠️ Could not fetch IDL data: ${err instanceof Error ? err.message : String(err)}`);
+      }
+
+      // Perform security analysis
+      console.error(`🔎 Performing ${auditType} security analysis...`);
+      const { issues, summary } = performSecurityAnalysis(sourceCode, auditType);
+      
+      // Analyze code complexity
+      const complexity = analyzeComplexity(sourceCode);
+
+      // Generate audit report
+      let auditReport = `# 🛡️ Solana Program Security Audit Report\n\n`;
+      
+      // Header information
+      auditReport += `**Build ID:** ${buildId}\n`;
+      if (programAddress) {
+        auditReport += `**Program Address:** ${programAddress}\n`;
+      }
+      if (idlData?.metadata?.name) {
+        auditReport += `**Program Name:** ${idlData.metadata.name}\n`;
+      }
+      auditReport += `**Audit Type:** ${auditType}\n`;
+      auditReport += `**Generated:** ${new Date().toISOString()}\n\n`;
+
+      // Executive Summary
+      auditReport += `## 📊 Executive Summary\n\n`;
+      
+      let riskLevel = 'LOW';
+      if (summary.critical > 0) riskLevel = 'CRITICAL';
+      else if (summary.high > 0) riskLevel = 'HIGH';
+      else if (summary.medium > 2) riskLevel = 'MEDIUM';
+      
+      auditReport += `**Overall Risk Level:** ${riskLevel}\n\n`;
+      
+      auditReport += `**Issues Found:**\n`;
+      auditReport += `- 🔴 Critical: ${summary.critical}\n`;
+      auditReport += `- 🟠 High: ${summary.high}\n`;
+      auditReport += `- 🟡 Medium: ${summary.medium}\n`;
+      auditReport += `- 🔵 Low: ${summary.low}\n`;
+      auditReport += `- ℹ️ Info: ${summary.info}\n`;
+      auditReport += `- **Total Issues:** ${summary.total}\n\n`;
+
+      // Code Metrics
+      auditReport += `## 📈 Code Metrics\n\n`;
+      auditReport += `- **Lines of Code:** ${complexity.linesOfCode}\n`;
+      auditReport += `- **Functions:** ${complexity.functions}\n`;
+      auditReport += `- **Cyclomatic Complexity:** ${complexity.cyclomaticComplexity}\n`;
+      auditReport += `- **Max Nesting Depth:** ${complexity.nestingDepth}\n\n`;
+
+      if (idlData) {
+        auditReport += `## 📝 Program Interface Analysis\n\n`;
+        auditReport += `- **Instructions:** ${idlData.instructions?.length || 0}\n`;
+        auditReport += `- **Accounts:** ${idlData.accounts?.length || 0}\n`;
+        auditReport += `- **Types:** ${idlData.types?.length || 0}\n\n`;
+        
+        if (idlData.instructions && idlData.instructions.length > 0) {
+          auditReport += `**Available Instructions:**\n`;
+          idlData.instructions.forEach((instruction: any, index: number) => {
+            auditReport += `${index + 1}. \`${instruction.name}\``;
+            if (instruction.args && instruction.args.length > 0) {
+              auditReport += ` (${instruction.args.length} parameters)`;
+            }
+            auditReport += `\n`;
+          });
+          auditReport += `\n`;
+        }
+      }
+
+      // Security Issues Detail
+      if (issues.length > 0) {
+        auditReport += `## 🚨 Security Issues\n\n`;
+        
+        // Group issues by severity
+        const groupedIssues: Record<string, typeof issues> = {};
+        issues.forEach(issue => {
+          if (!groupedIssues[issue.severity]) {
+            groupedIssues[issue.severity] = [];
+          }
+          groupedIssues[issue.severity].push(issue);
+        });
+
+        // Display issues by severity (critical first)
+        const severityOrder = ['critical', 'high', 'medium', 'low', 'info'];
+        const severityEmojis: Record<string, string> = {
+          critical: '🔴',
+          high: '🟠',
+          medium: '🟡',
+          low: '🔵',
+          info: 'ℹ️'
+        };
+
+        for (const severity of severityOrder) {
+          if (groupedIssues[severity]) {
+            auditReport += `### ${severityEmojis[severity]} ${severity.toUpperCase()} Issues\n\n`;
+            
+            groupedIssues[severity].forEach((issue, index) => {
+              auditReport += `#### ${index + 1}. ${issue.check}\n\n`;
+              auditReport += `**Category:** ${issue.category.replace('_', ' ').toUpperCase()}\n`;
+              auditReport += `**Description:** ${issue.description}\n`;
+              
+              if (issue.context) {
+                auditReport += `**Context:** ${issue.context}\n`;
+              }
+              
+              if (issue.details) {
+                auditReport += `**Details:** ${issue.details}\n`;
+              }
+              
+              if (issue.lineNumber) {
+                auditReport += `**Line:** ${issue.lineNumber}\n`;
+              }
+              
+              if (includeRecommendations) {
+                auditReport += `**Recommendation:** ${issue.recommendation}\n`;
+              }
+              auditReport += `\n`;
+            });
+          }
+        }
+      } else {
+        auditReport += `## ✅ Security Analysis Results\n\n`;
+        auditReport += `🎉 **Excellent!** No significant security issues were detected in this ${auditType} audit.\n\n`;
+        
+        auditReport += `**What this means:**\n`;
+        auditReport += `- Your program follows Solana/Anchor security best practices\n`;
+        auditReport += `- No critical vulnerabilities were found in the static analysis\n`;
+        auditReport += `- The code structure appears well-organized and secure\n\n`;
+        
+        auditReport += `**Still recommended:**\n`;
+        auditReport += `- ✅ Test thoroughly on devnet before mainnet deployment\n`;
+        auditReport += `- ✅ Consider a comprehensive audit for high-value applications\n`;
+        auditReport += `- ✅ Implement additional monitoring and testing\n`;
+        auditReport += `- ✅ Keep dependencies up to date\n\n`;
+        
+        if (auditType !== 'comprehensive') {
+          auditReport += `💡 **Tip:** Run a 'comprehensive' audit to check for additional optimization opportunities and best practice recommendations.\n\n`;
+        }
+      }
+
+      // Recommendations section
+      if (includeRecommendations && issues.length > 0) {
+        auditReport += `## 💡 General Recommendations\n\n`;
+        
+        if (summary.critical > 0 || summary.high > 0) {
+          auditReport += `**🚨 Immediate Actions Required:**\n`;
+          auditReport += `- Address all critical and high-severity issues before deployment\n`;
+          auditReport += `- Implement proper access controls and input validation\n`;
+          auditReport += `- Add comprehensive error handling\n\n`;
+        }
+        
+        auditReport += `**🔒 Security Best Practices:**\n`;
+        auditReport += `- Always validate account ownership and signatures\n`;
+        auditReport += `- Use checked arithmetic operations\n`;
+        auditReport += `- Implement the checks-effects-interactions pattern\n`;
+        auditReport += `- Add account discriminators to prevent type confusion\n`;
+        auditReport += `- Ensure accounts are rent-exempt\n`;
+        auditReport += `- Test thoroughly on devnet before mainnet deployment\n\n`;
+        
+        auditReport += `**⚡ Performance Optimizations:**\n`;
+        auditReport += `- Remove debug statements and TODO comments\n`;
+        auditReport += `- Consider using more efficient data structures\n`;
+        auditReport += `- Optimize for lower compute costs\n\n`;
+      }
+
+      // Footer
+      auditReport += `## ⚠️ Audit Limitations\n\n`;
+      auditReport += `This automated audit provides a baseline security analysis but has limitations:\n\n`;
+      auditReport += `- **Static Analysis Only:** This audit only analyzes the source code statically\n`;
+      auditReport += `- **Pattern-Based:** Detection is based on known patterns and may miss novel vulnerabilities\n`;
+      auditReport += `- **No Runtime Analysis:** Does not include dynamic testing or fuzzing\n`;
+      auditReport += `- **Human Review Recommended:** A manual security review by experts is still recommended\n\n`;
+      auditReport += `**For production deployments, consider:**\n`;
+      auditReport += `- Professional security audit by blockchain security firms\n`;
+      auditReport += `- Comprehensive testing including edge cases\n`;
+      auditReport += `- Bug bounty programs\n`;
+      auditReport += `- Gradual rollout and monitoring\n\n`;
+      
+      auditReport += `---\n`;
+      auditReport += `*Generated by Solana Builder Octo MCP - AI Security Audit Tool*`;
+
+      return {
+        content: [
+          {
+            type: "text",
+            text: auditReport,
+          },
+        ],
+      };
+
+    } catch (err) {
+      return {
+        content: [
+          {
+            type: "text",
+            text: `❌ Failed to generate audit: ${err instanceof Error ? err.message : String(err)}`,
+          },
+        ],
+      };
+    }
+  }
+);
+
 // MCP Tool: Deploy Solana Program
 server.tool(
   "deploy-solana-program",
@@ -643,6 +1391,7 @@ server.tool(
     }
   }
 );
+
 
 
 // Define interface for file information response
