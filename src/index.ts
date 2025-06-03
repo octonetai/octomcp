@@ -517,8 +517,7 @@ server.tool(
   }
 );
 
-// Enhanced AI Audit Tool Implementation
-// Replace the existing generate-AI-Audit tool with this implementation
+//  AI Audit Tool Implementation
 
 // Advanced code analysis utilities
 interface CodeContext {
