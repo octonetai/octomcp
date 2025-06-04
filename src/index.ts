@@ -1283,6 +1283,7 @@ server.tool(
       
       // Log deployment information
       console.error(`🚀 Deploying program with build ID ${buildId} to ${cluster} cluster`);
+      console.error(`⏱️ Timeout set to 4 minutes (240 seconds)`);
       
       // Log which wallet we're using
       if (wallet) {
@@ -1303,15 +1304,78 @@ server.tool(
 
       console.error(`🚀 Sending deploy request to ${SOLANA_DEPLOY_ENDPOINT}...`);
 
-      const res = await fetch(SOLANA_DEPLOY_ENDPOINT, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify(deployData),
-      });
+      // Create AbortController for 4 minute timeout
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => {
+        console.error(`⏱️ Deployment timeout after 4 minutes`);
+        controller.abort();
+      }, 240000); // 4 minutes = 240,000 milliseconds
 
-      const responseData = await res.json() as DeployResponse;
+      let res;
+      let responseData: DeployResponse;
+
+      try {
+        // Make request with 4 minute timeout
+        res = await fetch(SOLANA_DEPLOY_ENDPOINT, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify(deployData),
+          signal: controller.signal,
+        });
+
+        // Clear timeout if request completes successfully
+        clearTimeout(timeoutId);
+        console.error(`✅ Request completed before timeout`);
+
+        responseData = await res.json() as DeployResponse;
+
+      } catch (error) {
+        // Clear timeout in case of error
+        clearTimeout(timeoutId);
+        
+        // Handle timeout specifically
+        if (error instanceof Error && error.name === 'AbortError') {
+          return {
+            content: [
+              {
+                type: "text" as const,
+                text: `⏱️ Deployment timeout after 4 minutes.\n\n` +
+                      `This doesn't necessarily mean the deployment failed - Solana deployments can take time.\n\n` +
+                      `What to do next:\n` +
+                      `1. Wait a few more minutes and check if the program appears on the explorer\n` +
+                      `2. Use the fetch-program-files tool to verify if deployment succeeded\n` +
+                      `3. Check the Solana explorer for recent transactions\n` +
+                      `4. If needed, try deploying again\n\n` +
+                      `Build ID: ${buildId}\n` +
+                      `Cluster: ${cluster}\n\n` +
+                      `💡 Some deployments may still succeed even after timeout.`,
+              },
+            ],
+          };
+        }
+        
+        // Handle other network/fetch errors
+        if (error instanceof Error && error.message.includes('fetch')) {
+          return {
+            content: [
+              {
+                type: "text" as const,
+                text: `🌐 Network error during deployment: ${error.message}\n\n` +
+                      `This could be due to:\n` +
+                      `1. Network connectivity issues\n` +
+                      `2. Server overload\n` +
+                      `3. Temporary service unavailability\n\n` +
+                      `Please try again in a few minutes.`,
+              },
+            ],
+          };
+        }
+        
+        // Re-throw other errors to be handled by outer catch
+        throw error;
+      }
 
       if (!res.ok) {
         const errorRes = responseData as DeployError;
@@ -1383,14 +1447,15 @@ server.tool(
         content: [
           {
             type: "text" as const,
-            text: `❌ Failed to deploy Solana program: ${err instanceof Error ? err.message : String(err)}`,
+            text: `❌ Failed to deploy Solana program: ${err instanceof Error ? err.message : String(err)}\n\n` +
+                `If this was a timeout error, the deployment might still be processing.\n` +
+                `Check the Solana explorer or try the fetch-program-files tool to verify.`,
           },
         ],
       };
     }
   }
 );
-
 
 
 // Define interface for file information response
