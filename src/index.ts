@@ -1853,7 +1853,7 @@ server.tool(
     buildId: z.string().min(1).describe("Build ID of the previously built program"),
     programAddress: z.string().min(1).describe("Program address (ID) of the deployed program"),
     cluster: z.enum(["devnet", "mainnet"]).default("devnet").describe("Solana cluster the program is deployed to"),
-    templateRepo: z.string().default("https://github.com/octonetai/Solana-Dapp.git").describe("Git repository template to use for the UI"),
+    templateRepo: z.string().default("https://github.com/octonetai/solanadapp.git").describe("Git repository template to use for the UI"),
     gitpodBaseUrl: z.string().default("https://octo.up.railway.app").describe("Base URL for the Gitpod workspace"),
   },
   async ({ buildId, programAddress, cluster, templateRepo, gitpodBaseUrl }) => {
