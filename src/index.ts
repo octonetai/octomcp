@@ -7,27 +7,41 @@ import FormData from 'form-data';
 
 import fs from 'fs';
 import path from 'path';
+import bs58 from 'bs58'; 
 
 // Initialize default wallet and cluster settings
 let defaultWallet: { publicKey?: string, secretKey: string | number[] } | undefined;
 let defaultCluster: "devnet" | "mainnet" = "devnet";
 
-// Helper function to parse JSON array from string if needed
-function parseSecretKey(secretKeyStr: string): string | number[] {
-  // Check if it looks like a JSON array
+// Helper function to convert Base58 to unit array
+function convertBase58ToUnitArray(base58Key: string): number[] {
+  try {
+    const decoded = bs58.decode(base58Key);
+    return Array.from(decoded);
+  } catch (err) {
+    throw new Error(`Failed to decode Base58 key: ${err instanceof Error ? err.message : String(err)}`);
+  }
+}
+
+// Helper function to parse secret key and convert to unit array
+function parseSecretKey(secretKeyStr: string): number[] {
+  // Check if it looks like a JSON array (legacy format)
   if (secretKeyStr.startsWith('[') && secretKeyStr.endsWith(']')) {
     try {
-      // Parse the JSON array
-      return JSON.parse(secretKeyStr);
+      // Parse the JSON array and return as is
+      const parsed = JSON.parse(secretKeyStr);
+      if (Array.isArray(parsed) && parsed.every(item => typeof item === 'number')) {
+        return parsed;
+      } else {
+        throw new Error('Invalid array format');
+      }
     } catch (err) {
-      // If parsing fails, treat it as a regular string (possibly base58)
-      console.error('⚠️ Failed to parse secret key as JSON array, treating as Base58 string');
-      return secretKeyStr;
+      throw new Error('Failed to parse secret key as JSON array');
     }
   }
   
-  // If it doesn't look like a JSON array, return as is (likely base58)
-  return secretKeyStr;
+  // Assume it's a Base58 encoded string and convert to unit array
+  return convertBase58ToUnitArray(secretKeyStr);
 }
 
 // Parse command line arguments manually
@@ -50,23 +64,31 @@ const cliWalletSecretKey = getCliArg('wallet-secret-key');
 const cliCluster = getCliArg('cluster');
 
 if (cliWalletSecretKey) {
-  const secretKey = parseSecretKey(cliWalletSecretKey);
-  defaultWallet = {
-    publicKey: cliWalletPublicKey,
-    secretKey: secretKey
-  };
-  console.error('📝 Using wallet from command line arguments');
+  try {
+    const secretKeyArray = parseSecretKey(cliWalletSecretKey);
+    defaultWallet = {
+      publicKey: cliWalletPublicKey,
+      secretKey: secretKeyArray
+    };
+    console.error('📝 Using wallet from command line arguments (Base58 converted to unit array)');
+  } catch (err) {
+    console.error(`❌ Error parsing CLI wallet secret key: ${err instanceof Error ? err.message : String(err)}`);
+  }
 }
 
 // If not from CLI, load from environment variables
 if (!defaultWallet && process.env.SOLANA_WALLET_SECRET_KEY) {
-  const secretKey = parseSecretKey(process.env.SOLANA_WALLET_SECRET_KEY);
-  
-  defaultWallet = {
-    publicKey: process.env.SOLANA_WALLET_PUBLIC_KEY,
-    secretKey: secretKey
-  };
-  console.error('📝 Using wallet from environment variables');
+  try {
+    const secretKeyArray = parseSecretKey(process.env.SOLANA_WALLET_SECRET_KEY);
+    
+    defaultWallet = {
+      publicKey: process.env.SOLANA_WALLET_PUBLIC_KEY,
+      secretKey: secretKeyArray
+    };
+    console.error('📝 Using wallet from environment variables (Base58 converted to unit array)');
+  } catch (err) {
+    console.error(`❌ Error parsing environment wallet secret key: ${err instanceof Error ? err.message : String(err)}`);
+  }
 }
 
 // Set default cluster from CLI or env
@@ -86,11 +108,16 @@ if (!defaultWallet) {
       const config = JSON.parse(fs.readFileSync(configPath, 'utf8'));
       
       if (config.wallet && config.wallet.secretKey) {
-        defaultWallet = {
-          publicKey: config.wallet.publicKey,
-          secretKey: config.wallet.secretKey
-        };
-        console.error('📝 Using wallet from solana-config.json');
+        try {
+          const secretKeyArray = parseSecretKey(config.wallet.secretKey);
+          defaultWallet = {
+            publicKey: config.wallet.publicKey,
+            secretKey: secretKeyArray
+          };
+          console.error('📝 Using wallet from solana-config.json (Base58 converted to unit array)');
+        } catch (err) {
+          console.error(`❌ Error parsing config file wallet secret key: ${err instanceof Error ? err.message : String(err)}`);
+        }
       }
       
       // Only set cluster if not already set from CLI or env
@@ -109,12 +136,9 @@ if (!defaultWallet) {
 
 // Log wallet info if available
 if (defaultWallet) {
-  const secretKeyType = Array.isArray(defaultWallet.secretKey) 
-    ? 'array of numbers' 
-    : 'Base58 encoded string';
-  
   console.error(`💳 Default wallet loaded with public key: ${defaultWallet.publicKey || '(not provided)'}`);
-  console.error(`💳 Secret key format: ${secretKeyType}`);
+  console.error(`💳 Secret key format: unit array (converted from Base58)`);
+  console.error(`💳 Secret key length: ${Array.isArray(defaultWallet.secretKey) ? defaultWallet.secretKey.length : 'N/A'} bytes`);
 }
 
 const API_BASE_URL = "https://octomcp.xyz";
@@ -1309,7 +1333,7 @@ server.tool(
       const timeoutId = setTimeout(() => {
         console.error(`⏱️ Deployment timeout after 4 minutes`);
         controller.abort();
-      }, 240000); // 4 minutes = 240,000 milliseconds
+      }, 440000); // 4 minutes = 240,000 milliseconds
 
       let res;
       let responseData: DeployResponse;
